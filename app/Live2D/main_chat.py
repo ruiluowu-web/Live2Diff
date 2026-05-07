@@ -197,15 +197,27 @@ async def shutdown_event():
 # 拖拽最近邻帧搜索（直接响应，绕开队列）
 # ------------------------------------------------------------------
 
-def find_best_node(t1_points: List) -> str:
-    """在预加载的 NODE_POSITIONS 中全局搜索 MSE 最小的帧，纯内存计算"""
+def find_best_node(t1_points: List, start_node: str = None, max_depth: int = 10) -> str:
+    """BFS 约束搜索：只在当前帧的图邻居（max_depth 跳以内）找 MSE 最小的帧。"""
     if not t1_points or not models.NODE_POSITIONS:
         return current_image_path
     t1_np = np.array(t1_points, dtype=np.float32)
     n = len(t1_points)
+
+    if start_node and models.G is not None and start_node in models.G.nodes:
+        try:
+            candidates = nx.single_source_shortest_path_length(
+                models.G, start_node, cutoff=max_depth
+            )
+        except Exception:
+            candidates = models.NODE_POSITIONS
+    else:
+        candidates = models.NODE_POSITIONS
+
     min_loss = float('inf')
-    best = current_image_path
-    for node, positions in models.NODE_POSITIONS.items():
+    best = start_node if start_node else current_image_path
+    for node in candidates:
+        positions = models.NODE_POSITIONS.get(node, [])
         if not positions or len(positions) != n:
             continue
         loss = float(np.mean((t1_np - np.array(positions, dtype=np.float32)) ** 2))
@@ -217,15 +229,13 @@ def find_best_node(t1_points: List) -> str:
 
 @app.post("/api/best-frame")
 async def get_best_frame(data: Dict[str, Any]):
-    """
-    拖动专用接口：接收当前 T1 坐标，直接返回最匹配的帧路径。
-    不写队列，不做 BFS，延迟 ≈ 网络 RTT + 内存搜索时间。
-    """
+    """拖动专用接口：接收当前 T1 坐标，在当前帧邻域内返回最匹配帧。"""
     t1 = data.get("t1", [])
     if not t1:
         return JSONResponse(content={"image_src": "/" + current_image_path, "t0_points": []})
+    start = current_image_path.lstrip('/')
     loop = asyncio.get_event_loop()
-    best_node = await loop.run_in_executor(None, find_best_node, t1)
+    best_node = await loop.run_in_executor(None, find_best_node, t1, start, 10)
     t0_positions = models.NODE_POSITIONS.get(best_node, [])
     return JSONResponse(content={
         "image_src": "/" + best_node,
